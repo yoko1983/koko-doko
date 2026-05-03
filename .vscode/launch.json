@@ -1,0 +1,34 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Backend: Uvicorn",
+            "type": "debugpy",
+            "request": "launch",
+            "python": "${workspaceFolder}/backend/venv/bin/python",
+            "module": "uvicorn",
+            "args": ["main:app", "--reload"],
+            "cwd": "${workspaceFolder}/backend",
+            "preLaunchTask": "Terminate Port 8000"
+        },
+        {
+            "name": "Frontend: npm run dev",
+            "type": "node",
+            "request": "launch",
+            "runtimeExecutable": "npm",
+            "runtimeArgs": ["run", "dev"],
+            "cwd": "${workspaceFolder}/frontend",
+            "console": "integratedTerminal"
+        }
+    ],
+    "compounds": [
+        {
+            "name": "Full Stack (Backend & Frontend)",
+            "configurations": [
+                "Backend: Uvicorn",
+                "Frontend: npm run dev"
+            ],
+            "stopAll": false
+        }
+    ]
+}

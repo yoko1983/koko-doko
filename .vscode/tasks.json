@@ -1,0 +1,34 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Create venv (backend)",
+      "type": "shell",
+      "command": "python3",
+      "args": [
+        "-m", "venv", "backend/venv"
+      ],
+      "problemMatcher": []
+    },
+    {
+      "label": "Install requirements (backend)",
+      "type": "shell",
+      "command": "${workspaceFolder}/backend/venv/bin/python3",
+      "args": [
+        "-m", "pip", "install", "-r", "backend/requirements.txt"
+      ],
+      "dependsOn": "Create venv (backend)",
+      "problemMatcher": []
+    },
+    {
+      "label": "Terminate Port 8000",
+      "type": "shell",
+      "command": "fuser -k 8000/tcp || true",
+      "presentation": {
+          "reveal": "silent",
+          "panel": "shared"
+      },
+      "problemMatcher": []
+     }    
+  ]
+}

@@ -1,0 +1,34 @@
+# OS / Editor
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+
+# Secrets / env files (commit templates only)
+.env
+.env.*
+!.env.template
+
+# Node / Frontend
+node_modules/
+dist/
+.vite/
+.cache/
+
+# Codex / local tooling
+.codex/
+.agents/
+
+# This environment reserves `.git/` as read-only; use `.gitdir/` instead
+.gitdir/
