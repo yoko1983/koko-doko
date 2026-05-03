@@ -18,7 +18,7 @@ load_dotenv()
 
 # --- ロギング設定 ---
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
         logging.FileHandler("backend.log"),
@@ -352,13 +352,15 @@ async def geocode(
 # --- 3. 立地推定ロジック ---
 def get_osrm_distance(start_coord: Tuple[float, float], end_coord: Tuple[float, float]) -> float:
     url = f"{OSRM_BASE_URL}{start_coord[0]},{start_coord[1]};{end_coord[0]},{end_coord[1]}?overview=false"
+    logger.debug(f"OSRM Route Request: {url}")
     try:
         response = requests.get(url, timeout=OSRM_TIMEOUT_S)
         data = response.json()
         if data.get("code") == "Ok":
             return data["routes"][0]["distance"]
-    except:
-        pass
+        logger.warning(f"OSRM Route Error: {data.get('code')} for {url}")
+    except Exception as e:
+        logger.error(f"OSRM Route Exception: {str(e)} for {url}")
     return float('inf')
 
 def get_osrm_table_distances(start_coord: Tuple[float, float], end_coords: List[Tuple[float, float]]) -> List[float]:
@@ -372,13 +374,16 @@ def get_osrm_table_distances(start_coord: Tuple[float, float], end_coords: List[
         "destinations": ";".join(str(i) for i in range(1, len(coords))),
         "annotations": "distance",
     }
+    logger.debug(f"OSRM Table Request: {url} params={params}")
     try:
         response = requests.get(url, params=params, timeout=OSRM_TIMEOUT_S)
         data = response.json()
         if data.get("code") != "Ok":
+            logger.warning(f"OSRM Table Error: {data.get('code')} for {url}")
             return [float("inf")] * len(end_coords)
         distances = data.get("distances")
         if not (isinstance(distances, list) and distances and isinstance(distances[0], list)):
+            logger.warning(f"OSRM Table Malformed Data: {distances}")
             return [float("inf")] * len(end_coords)
         row = distances[0]
         if len(row) < (1 + len(end_coords)):
@@ -387,24 +392,33 @@ def get_osrm_table_distances(start_coord: Tuple[float, float], end_coords: List[
         for d in row[1 : 1 + len(end_coords)]:
             out.append(float(d) if d is not None else float("inf"))
         return out
-    except Exception:
+    except Exception as e:
+        logger.error(f"OSRM Table Exception: {str(e)} for {url}")
         return [float("inf")] * len(end_coords)
 
 def evaluate_point(point: Tuple[float, float], facilities: List[Facility]) -> float:
     total_error = 0
-    ROAD_FACTOR = 1.1 
+    ROAD_FACTOR = 1.0  # PoCの精度を再現するため1.0に戻す
+    INF_PENALTY = 10000 
+
     if OSRM_MODE == "table":
         end_coords = [fac.coord for fac in facilities if fac.coord]
         osrm_dists = get_osrm_table_distances(point, end_coords)
         facs = [fac for fac in facilities if fac.coord]
         for fac, osrm_dist in zip(facs, osrm_dists):
-            total_error += abs(osrm_dist - (fac.dist_m * ROAD_FACTOR))
+            if osrm_dist < float('inf'):
+                total_error += abs(osrm_dist - (fac.dist_m * ROAD_FACTOR))
+            else:
+                total_error += INF_PENALTY
     else:
         for fac in facilities:
             if not fac.coord:
                 continue
             osrm_dist = get_osrm_distance(point, fac.coord)
-            total_error += abs(osrm_dist - (fac.dist_m * ROAD_FACTOR))
+            if osrm_dist < float('inf'):
+                total_error += abs(osrm_dist - (fac.dist_m * ROAD_FACTOR))
+            else:
+                total_error += INF_PENALTY
     return total_error
 
 @app.post("/estimate")
@@ -438,21 +452,25 @@ async def estimate_location(req: EstimationRequest):
         return best, min_err
 
     try:
-        best_c, err_c = scan(generate_grid(center_lon, center_lat, 1000, 100))
-        if best_c is None or not np.isfinite(err_c):
+        # PoCの半径とステップに合わせる (800m, 100m)
+        best_c, err_c = scan(generate_grid(center_lon, center_lat, 800, 100))
+        if best_c is None or err_c >= float('inf'):
+            logger.error(f"Coarse scan failed: best_c={best_c}, err_c={err_c}")
             raise HTTPException(
                 status_code=502,
-                detail="OSRM distance calculation failed (coarse scan). Try again or adjust OSRM_TIMEOUT_S / OSRM_TABLE_MAX_WORKERS.",
+                detail=f"OSRM distance calculation failed (coarse scan). err={err_c}",
             )
 
-        best_f, err_f = scan(generate_grid(best_c[0], best_c[1], 200, 20))
-        if best_f is None or not np.isfinite(err_f):
+        # PoCの半径とステップに合わせる (150m, 25m)
+        best_f, err_f = scan(generate_grid(best_c[0], best_c[1], 150, 25))
+        if best_f is None or err_f >= float('inf'):
+            logger.error(f"Fine scan failed: best_f={best_f}, err_f={err_f}")
             raise HTTPException(
                 status_code=502,
-                detail="OSRM distance calculation failed (fine scan). Try again or adjust OSRM_TIMEOUT_S / OSRM_TABLE_MAX_WORKERS.",
+                detail=f"OSRM distance calculation failed (fine scan). err={err_f}",
             )
 
-        logger.info(f"Estimation successful: {best_f}")
+        logger.info(f"Estimation successful: {best_f} (err={err_f})")
         return {
             "coord": best_f,
             "avg_error": err_f / len(facilities),
