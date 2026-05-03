@@ -47,6 +47,10 @@ MAPBOX_ACCESS_TOKEN = os.getenv("MAPBOX_ACCESS_TOKEN")
 GOOGLE_PLACES_API_KEY = os.getenv("GOOGLE_PLACES_API_KEY")
 GEOCODER_PROVIDER = os.getenv("GEOCODER_PROVIDER", "mapbox").lower()  # mapbox | google | auto
 OSRM_BASE_URL = "http://router.project-osrm.org/route/v1/foot/"
+OSRM_TABLE_BASE_URL = "http://router.project-osrm.org/table/v1/foot/"
+OSRM_MODE = os.getenv("OSRM_MODE", "route").lower()  # route | table
+OSRM_TIMEOUT_S = float(os.getenv("OSRM_TIMEOUT_S", "3"))
+OSRM_TABLE_MAX_WORKERS = int(os.getenv("OSRM_TABLE_MAX_WORKERS", "6"))
 
 app = FastAPI()
 
@@ -349,7 +353,7 @@ async def geocode(
 def get_osrm_distance(start_coord: Tuple[float, float], end_coord: Tuple[float, float]) -> float:
     url = f"{OSRM_BASE_URL}{start_coord[0]},{start_coord[1]};{end_coord[0]},{end_coord[1]}?overview=false"
     try:
-        response = requests.get(url, timeout=3)
+        response = requests.get(url, timeout=OSRM_TIMEOUT_S)
         data = response.json()
         if data.get("code") == "Ok":
             return data["routes"][0]["distance"]
@@ -357,13 +361,50 @@ def get_osrm_distance(start_coord: Tuple[float, float], end_coord: Tuple[float, 
         pass
     return float('inf')
 
+def get_osrm_table_distances(start_coord: Tuple[float, float], end_coords: List[Tuple[float, float]]) -> List[float]:
+    if not end_coords:
+        return []
+    coords = [start_coord, *end_coords]
+    coord_str = ";".join([f"{lon},{lat}" for lon, lat in coords])
+    url = f"{OSRM_TABLE_BASE_URL}{coord_str}"
+    params = {
+        "sources": "0",
+        "destinations": ";".join(str(i) for i in range(1, len(coords))),
+        "annotations": "distance",
+    }
+    try:
+        response = requests.get(url, params=params, timeout=OSRM_TIMEOUT_S)
+        data = response.json()
+        if data.get("code") != "Ok":
+            return [float("inf")] * len(end_coords)
+        distances = data.get("distances")
+        if not (isinstance(distances, list) and distances and isinstance(distances[0], list)):
+            return [float("inf")] * len(end_coords)
+        row = distances[0]
+        if len(row) < (1 + len(end_coords)):
+            return [float("inf")] * len(end_coords)
+        out: List[float] = []
+        for d in row[1 : 1 + len(end_coords)]:
+            out.append(float(d) if d is not None else float("inf"))
+        return out
+    except Exception:
+        return [float("inf")] * len(end_coords)
+
 def evaluate_point(point: Tuple[float, float], facilities: List[Facility]) -> float:
     total_error = 0
     ROAD_FACTOR = 1.1 
-    for fac in facilities:
-        if not fac.coord: continue
-        osrm_dist = get_osrm_distance(point, fac.coord)
-        total_error += abs(osrm_dist - (fac.dist_m * ROAD_FACTOR))
+    if OSRM_MODE == "table":
+        end_coords = [fac.coord for fac in facilities if fac.coord]
+        osrm_dists = get_osrm_table_distances(point, end_coords)
+        facs = [fac for fac in facilities if fac.coord]
+        for fac, osrm_dist in zip(facs, osrm_dists):
+            total_error += abs(osrm_dist - (fac.dist_m * ROAD_FACTOR))
+    else:
+        for fac in facilities:
+            if not fac.coord:
+                continue
+            osrm_dist = get_osrm_distance(point, fac.coord)
+            total_error += abs(osrm_dist - (fac.dist_m * ROAD_FACTOR))
     return total_error
 
 @app.post("/estimate")
@@ -372,6 +413,7 @@ async def estimate_location(req: EstimationRequest):
     if len(facilities) < 2:
         raise HTTPException(status_code=400, detail="Need at least 2 coords")
 
+    logger.info(f"Estimate request: facilities={len(facilities)} osrm_mode={OSRM_MODE} timeout={OSRM_TIMEOUT_S}s")
     lons = [f.coord[0] for f in facilities]
     lats = [f.coord[1] for f in facilities]
     center_lon, center_lat = np.mean(lons), np.mean(lats)
@@ -387,22 +429,37 @@ async def estimate_location(req: EstimationRequest):
 
     def scan(grid):
         best, min_err = None, float('inf')
-        with ThreadPoolExecutor(max_workers=15) as executor:
+        workers = OSRM_TABLE_MAX_WORKERS if OSRM_MODE == "table" else 15
+        with ThreadPoolExecutor(max_workers=workers) as executor:
             errors = list(executor.map(lambda p: evaluate_point(p, facilities), grid))
         for p, e in zip(grid, errors):
-            if e < min_err: min_err, best = e, p
+            if e < min_err:
+                min_err, best = e, p
         return best, min_err
 
     try:
         best_c, err_c = scan(generate_grid(center_lon, center_lat, 1000, 100))
+        if best_c is None or not np.isfinite(err_c):
+            raise HTTPException(
+                status_code=502,
+                detail="OSRM distance calculation failed (coarse scan). Try again or adjust OSRM_TIMEOUT_S / OSRM_TABLE_MAX_WORKERS.",
+            )
+
         best_f, err_f = scan(generate_grid(best_c[0], best_c[1], 200, 20))
-        
+        if best_f is None or not np.isfinite(err_f):
+            raise HTTPException(
+                status_code=502,
+                detail="OSRM distance calculation failed (fine scan). Try again or adjust OSRM_TIMEOUT_S / OSRM_TABLE_MAX_WORKERS.",
+            )
+
         logger.info(f"Estimation successful: {best_f}")
         return {
             "coord": best_f,
             "avg_error": err_f / len(facilities),
-            "google_maps": f"https://www.google.com/maps?q={best_f[1]},{best_f[0]}"
+            "google_maps": f"https://www.google.com/maps?q={best_f[1]},{best_f[0]}",
         }
+    except HTTPException:
+        raise
     except Exception as e:
         logger.exception("Error during estimation")
         raise HTTPException(status_code=500, detail=str(e))
