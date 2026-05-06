@@ -32,3 +32,6 @@ dist/
 
 # This environment reserves `.git/` as read-only; use `.gitdir/` instead
 .gitdir/
+
+# Others
+osrm/

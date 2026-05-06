@@ -46,8 +46,8 @@ client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 MAPBOX_ACCESS_TOKEN = os.getenv("MAPBOX_ACCESS_TOKEN")
 GOOGLE_PLACES_API_KEY = os.getenv("GOOGLE_PLACES_API_KEY")
 GEOCODER_PROVIDER = os.getenv("GEOCODER_PROVIDER", "mapbox").lower()  # mapbox | google | auto
-OSRM_BASE_URL = "http://router.project-osrm.org/route/v1/foot/"
-OSRM_TABLE_BASE_URL = "http://router.project-osrm.org/table/v1/foot/"
+OSRM_BASE_URL = os.getenv("OSRM_BASE_URL", "http://localhost:5000/route/v1/foot/")
+OSRM_TABLE_BASE_URL = os.getenv("OSRM_TABLE_BASE_URL", "http://localhost:5000/table/v1/foot/")
 OSRM_MODE = os.getenv("OSRM_MODE", "route").lower()  # route | table
 OSRM_TIMEOUT_S = float(os.getenv("OSRM_TIMEOUT_S", "3"))
 OSRM_TABLE_MAX_WORKERS = int(os.getenv("OSRM_TABLE_MAX_WORKERS", "6"))
@@ -452,29 +452,29 @@ async def estimate_location(req: EstimationRequest):
         return best, min_err
 
     try:
-        # PoCの半径とステップに合わせる (800m, 100m)
-        best_c, err_c = scan(generate_grid(center_lon, center_lat, 800, 100))
-        if best_c is None or err_c >= float('inf'):
-            logger.error(f"Coarse scan failed: best_c={best_c}, err_c={err_c}")
-            raise HTTPException(
-                status_code=502,
-                detail=f"OSRM distance calculation failed (coarse scan). err={err_c}",
-            )
+        # 1段階（超広域）: 半径800mを200m刻みでアタリをつける（約81地点）
+        best_1, err_1 = scan(generate_grid(center_lon, center_lat, 800, 200))
+        if best_1 is None or err_1 >= float('inf'):
+            logger.error(f"Stage 1 scan failed: err={err_1}")
+            raise HTTPException(status_code=502, detail=f"OSRM calculation failed (Stage 1). err={err_1}")
 
-        # PoCの半径とステップに合わせる (150m, 25m)
-        best_f, err_f = scan(generate_grid(best_c[0], best_c[1], 150, 25))
-        if best_f is None or err_f >= float('inf'):
-            logger.error(f"Fine scan failed: best_f={best_f}, err_f={err_f}")
-            raise HTTPException(
-                status_code=502,
-                detail=f"OSRM distance calculation failed (fine scan). err={err_f}",
-            )
+        # 2段階（中域）: 半径200mを50m刻みで絞り込む（約81地点）
+        best_2, err_2 = scan(generate_grid(best_1[0], best_1[1], 200, 50))
+        if best_2 is None or err_2 >= float('inf'):
+            logger.error(f"Stage 2 scan failed: err={err_2}")
+            raise HTTPException(status_code=502, detail=f"OSRM calculation failed (Stage 2). err={err_2}")
 
-        logger.info(f"Estimation successful: {best_f} (err={err_f})")
+        # 3段階（詳細）: 半径50mを10m刻みでピンポイント特定（約121地点）
+        best_3, err_3 = scan(generate_grid(best_2[0], best_2[1], 50, 10))
+        if best_3 is None or err_3 >= float('inf'):
+            logger.error(f"Stage 3 scan failed: err={err_3}")
+            raise HTTPException(status_code=502, detail=f"OSRM calculation failed (Stage 3). err={err_3}")
+
+        logger.info(f"Estimation successful: {best_3} (err={err_3})")
         return {
-            "coord": best_f,
-            "avg_error": err_f / len(facilities),
-            "google_maps": f"https://www.google.com/maps?q={best_f[1]},{best_f[0]}",
+            "coord": best_3,
+            "avg_error": err_3 / len(facilities),
+            "google_maps": f"https://www.google.com/maps?q={best_3[1]},{best_3[0]}",
         }
     except HTTPException:
         raise
